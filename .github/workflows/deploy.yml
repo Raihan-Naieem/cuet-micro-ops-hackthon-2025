@@ -21,7 +21,7 @@ jobs:
 
       - name: Deploy to VM
         run: |
-          ssh -o StrictHostKeyChecking=no ubuntu@10.10.0.8 << 'DEPLOY_SCRIPT'
+          ssh -o StrictHostKeyChecking=no ubuntu@36.255.71.41 << 'DEPLOY_SCRIPT'
 
           echo "📂 Navigating to project directory..."
           cd /home/ubuntu/app || exit 1
