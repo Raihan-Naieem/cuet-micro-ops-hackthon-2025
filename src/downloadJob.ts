@@ -1,4 +1,6 @@
 // downloadJob.ts
+import { randomUUID } from "node:crypto";
+
 export type JobStatus = "queued" | "processing" | "completed" | "failed";
 
 export interface DownloadJob {
@@ -13,7 +15,7 @@ export const jobs = new Map<string, DownloadJob>();
 
 // Create a new job
 export const createJob = (fileIds: number[]): DownloadJob => {
-  const jobId = crypto.randomUUID();
+  const jobId = randomUUID();
   const job: DownloadJob = {
     jobId,
     fileIds,
@@ -21,24 +23,25 @@ export const createJob = (fileIds: number[]): DownloadJob => {
   };
   jobs.set(jobId, job);
 
-  // Start background processing
-  processJob(job);
+  // Start background processing (non-blocking)
+  void processJob(job);
 
   return job;
 };
 
 // Mock async job processing
-const processJob = async (job: DownloadJob) => {
+const processJob = async (job: DownloadJob): Promise<void> => {
   job.status = "processing";
 
   for (const fileId of job.fileIds) {
     const delay = Math.floor(Math.random() * 5000) + 1000; // 1-6s
     await new Promise((res) => setTimeout(res, delay));
 
-    if (!job.result) job.result = {};
+    job.result ??= {};
+    const token = randomUUID();
     job.result[fileId] = {
       available: Math.random() > 0.3, // 70% chance available
-      downloadUrl: `https://storage.example.com/downloads/${fileId}.zip?token=${crypto.randomUUID()}`,
+      downloadUrl: `https://storage.example.com/downloads/${String(fileId)}.zip?token=${token}`,
     };
   }
 

@@ -1,6 +1,7 @@
 import { createRoute } from "@hono/zod-openapi";
-import { jobs, createJob } from "../downloadJob.ts";
 import { z } from "zod";
+import type { Context } from "hono";
+import { jobs, createJob } from "../downloadJob.ts";
 
 // Initiate download job
 export const initiateRoute = createRoute(
@@ -27,9 +28,9 @@ export const initiateRoute = createRoute(
       },
     },
   },
-  (c) => {
-    const { file_ids } = c.req.valid("json");
-    const job = createJob(file_ids);
+  (c: Context) => {
+    const body = c.req.valid("json") as { file_ids: number[] };
+    const job = createJob(body.file_ids);
     return c.json({ jobId: job.jobId, status: job.status });
   },
 );
@@ -51,7 +52,7 @@ export const statusRoute = createRoute(
       404: { description: "Job not found" },
     },
   },
-  (c) => {
+  (c: Context) => {
     const jobId = c.req.param("jobId");
     const job = jobs.get(jobId);
     if (!job) return c.json({ error: "Job not found" }, 404);
@@ -72,7 +73,7 @@ export const resultRoute = createRoute(
             schema: z.object({
               jobId: z.string(),
               status: z.string(),
-              result: z.any(),
+              result: z.record(z.unknown()).optional(),
             }),
           },
         },
@@ -80,7 +81,7 @@ export const resultRoute = createRoute(
       404: { description: "Job not found" },
     },
   },
-  (c) => {
+  (c: Context) => {
     const jobId = c.req.param("jobId");
     const job = jobs.get(jobId);
     if (!job) return c.json({ error: "Job not found" }, 404);
