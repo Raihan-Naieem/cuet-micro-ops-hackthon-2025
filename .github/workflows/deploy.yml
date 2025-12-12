@@ -23,8 +23,15 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no ubuntu@36.255.71.41 << 'DEPLOY_SCRIPT'
 
-          echo "📂 Navigating to project directory..."
-          cd /home/ubuntu/app || exit 1
+          echo "📂 Setting up project directory..."
+          mkdir -p /home/ubuntu/app
+          cd /home/ubuntu/app
+
+          echo "🔍 Checking if repo exists..."
+          if [ ! -d .git ]; then
+            echo "📥 Cloning repository..."
+            git clone https://github.com/Raihan-Naieem/cuet-micro-ops-hackthon-2025.git .
+          fi
 
           echo "🔄 Pulling latest code..."
           git fetch origin
