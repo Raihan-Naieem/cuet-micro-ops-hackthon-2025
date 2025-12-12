@@ -1,7 +1,11 @@
-1. Architecture Diagram (Option A: Polling)
-   The system uses a Single-Process Asynchronous Polling pattern. Instead of external infrastructure, we utilize Node.js's non-blocking event loop and in-memory storage to handle concurrency.
+# Challenge 2: Long-Running Download Architecture
 
-Diagram Description:
+## Architecture Diagram
+
+![Architecture Diagram](./Architechture.jpeg)
+
+## 1. Architecture Design (Option A: Polling)
+
 Client: Sends HTTP requests
 API server: Handles the request and immediately responds.
 In-Memory stores:A local variable (const jobs = {} ) acting as the database.
