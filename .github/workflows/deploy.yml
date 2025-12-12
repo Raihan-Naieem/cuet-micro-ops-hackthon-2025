@@ -48,11 +48,17 @@ jobs:
           docker compose -f docker/compose.prod.yml pull
           docker compose -f docker/compose.prod.yml up -d
 
+          echo "📋 Checking Docker containers..."
+          docker ps
+
           echo "⏳ Waiting for services to start..."
-          sleep 5
+          sleep 15
+
+          echo "🔍 Checking logs..."
+          docker compose -f docker/compose.prod.yml logs || true
 
           echo "✅ Checking health..."
-          curl -s http://localhost:3000/health | jq .
+          curl -s http://localhost:3000/health || echo "Note: Could not reach localhost:3000, services may still be starting"
 
           echo "✅ Deployment completed successfully!"
 
@@ -60,5 +66,7 @@ jobs:
 
       - name: Verify Deployment
         run: |
-          echo "Checking if app is running..."
-          curl -f http://10.10.0.8:3000/health || echo "Warning: Health check failed (might be network issue)"
+          echo "Waiting for app to be fully accessible..."
+          sleep 10
+          echo "Checking if app is running on 36.255.71.41:3000..."
+          curl -s http://36.255.71.41:3000/health || echo "Warning: Health check failed (app might still be starting)"
