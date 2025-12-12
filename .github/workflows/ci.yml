@@ -11,11 +11,15 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-24.04
-    container:
-      image: node:24-slim
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node.js with npm caching
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
@@ -36,11 +40,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node.js with npm caching
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
       - name: Install dependencies
         run: npm ci
 
       - name: Run E2E tests
-        run: npm run test:e2e
+        run: npm run test:e2e 2>&1 | tee test-results.txt
         env:
           NODE_ENV: development
           PORT: 3000
@@ -53,6 +63,21 @@ jobs:
           RATE_LIMIT_WINDOW_MS: "60000"
           RATE_LIMIT_MAX_REQUESTS: "100"
           CORS_ORIGINS: "*"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.txt
+          retention-days: 30
+
+      - name: Display test summary
+        if: always()
+        run: |
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          tail -20 test-results.txt >> $GITHUB_STEP_SUMMARY || echo "No test results found"
 
   build:
     name: Build Docker Image
