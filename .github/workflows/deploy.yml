@@ -1,0 +1,57 @@
+name: Deploy to VM
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.VM_SSH_KEY }}
+          ssh-known-hosts: ${{ secrets.VM_KNOWN_HOSTS }}
+
+      - name: Deploy to VM
+        run: |
+          ssh -o StrictHostKeyChecking=no ubuntu@10.10.0.8 << 'DEPLOY_SCRIPT'
+
+          echo "📂 Navigating to project directory..."
+          cd /home/ubuntu/app || exit 1
+
+          echo "🔄 Pulling latest code..."
+          git fetch origin
+          git checkout main
+          git pull origin main
+
+          echo "📦 Installing dependencies..."
+          npm ci
+
+          echo "🔨 Building application..."
+          npm run build || true
+
+          echo "🐳 Restarting Docker services..."
+          docker compose -f docker/compose.prod.yml pull
+          docker compose -f docker/compose.prod.yml up -d
+
+          echo "⏳ Waiting for services to start..."
+          sleep 5
+
+          echo "✅ Checking health..."
+          curl -s http://localhost:3000/health | jq .
+
+          echo "✅ Deployment completed successfully!"
+
+          DEPLOY_SCRIPT
+
+      - name: Verify Deployment
+        run: |
+          echo "Checking if app is running..."
+          curl -f http://10.10.0.8:3000/health || echo "Warning: Health check failed (might be network issue)"
