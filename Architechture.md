@@ -2,7 +2,7 @@
 
 ## Architecture Diagram
 
-![Architecture Diagram](./Architechture.jpeg)
+![Architecture Diagram](./Architechture.png)
 
 ## 1. Architecture Design (Option A: Polling)
 
