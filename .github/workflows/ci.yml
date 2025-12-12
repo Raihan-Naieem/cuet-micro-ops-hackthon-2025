@@ -1,75 +1,167 @@
+# ============================================================================
+# CI/CD Pipeline Configuration
+# ============================================================================
+#
+# This GitHub Actions workflow automates:
+# 1. Linting & Code Quality (ESLint, Prettier)
+# 2. Testing (E2E tests)
+# 3. Docker Image Build & Cache
+# 4. Optional Deployment
+#
+# Triggers:
+# - Any push to main/master branch
+# - Any pull request to main/master branch
+#
+# Benefits:
+# - Catch issues before merging
+# - Maintain code quality standards
+# - Build artifacts for deployment
+# - Docker layer caching for speed
+#
+# Access:
+# - View pipeline status in GitHub > Actions tab
+# - Badges available for README
+#
+# Status Badge for README:
+# ![CI](https://github.com/YOUR_ORG/YOUR_REPO/workflows/CI/badge.svg)
+
 name: CI
 
 on:
+  # Trigger on push to main branch
   push:
     branches: [main, master]
+  # Trigger on pull requests targeting main branch
   pull_request:
     branches: [main, master]
 
 jobs:
+  # ============================================================================
+  # LINTING & CODE QUALITY
+  # ============================================================================
+  # Runs linting and code formatting checks
+  # Fails fast if code quality issues found
+  # Must pass before running other jobs
   lint:
     name: Lint
     runs-on: ubuntu-24.04
     container:
+      # Use official Node.js image (slim variant for speed)
       image: node:24-slim
     steps:
+      # Checkout repository code
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Install dependencies
+      # npm ci (clean install) preferred over npm install in CI
+      # - Deterministic: uses lock file exactly
+      # - Faster: no package resolution
+      # - Safer: fails on lock file mismatch
       - name: Install dependencies
         run: npm ci
 
+      # Run ESLint to check code quality
+      # Catches:
+      # - Unused variables
+      # - Type errors
+      # - Best practice violations
+      # - Security issues
       - name: Run ESLint
         run: npm run lint
 
+      # Check code formatting
+      # Ensures all code follows Prettier rules
+      # Fails if any files don't match format
       - name: Check formatting
         run: npm run format:check
 
+  # ============================================================================
+  # E2E TESTING
+  # ============================================================================
+  # Runs end-to-end tests to verify functionality
+  # Tests: Health checks, Download endpoints, S3 connectivity
+  # Depends on: Lint job (must pass first)
   test:
     name: E2E Tests
     runs-on: ubuntu-24.04
-    needs: lint
+    needs: lint  # Only runs after lint passes
     container:
       image: node:24-slim
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Install dependencies with npm ci
       - name: Install dependencies
         run: npm ci
 
+      # Run E2E test suite
+      # Tests verify:
+      # - /health endpoint returns correct status
+      # - /v1/download/* endpoints work correctly
+      # - Error handling works as expected
+      # - Timeouts and rate limiting work
       - name: Run E2E tests
         run: npm run test:e2e
         env:
+          # Test configuration
           NODE_ENV: development
           PORT: 3000
+          
+          # S3 Configuration
+          # Mock mode (no S3 bucket): empty S3_BUCKET_NAME
           S3_REGION: us-east-1
-          S3_BUCKET_NAME: ""
+          S3_BUCKET_NAME: ""  # Mock mode for testing
           S3_FORCE_PATH_STYLE: "true"
+          
+          # Observability (disabled in CI)
           SENTRY_DSN: ""
           OTEL_EXPORTER_OTLP_ENDPOINT: ""
+          
+          # Rate limiting & timeouts
           REQUEST_TIMEOUT_MS: "30000"
           RATE_LIMIT_WINDOW_MS: "60000"
           RATE_LIMIT_MAX_REQUESTS: "100"
+          
+          # CORS
           CORS_ORIGINS: "*"
 
+  # ============================================================================
+  # DOCKER BUILD
+  # ============================================================================
+  # Builds Docker image for deployment
+  # Uses BuildKit for fast, efficient builds
+  # Caches layers in GitHub Actions cache
+  # Depends on: Test job (must pass first)
   build:
     name: Build Docker Image
     runs-on: ubuntu-24.04
-    needs: test
+    needs: test  # Only runs after tests pass
     steps:
+      # Checkout repository
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Setup Docker Buildx for advanced build features
+      # Enables: BuildKit, multi-platform builds, caching
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Build production Docker image
+      # Features:
+      # - Uses Dockerfile.prod (optimized for production)
+      # - Tags with git SHA for immutability
+      # - Uses GitHub Actions cache for speed
+      # - push: false (only build, don't push to registry)
       - name: Build Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: docker/Dockerfile.prod
-          push: false
+          context: .  # Use entire repository as build context
+          file: docker/Dockerfile.prod  # Production Dockerfile
+          push: false  # Don't push (comment out for registry)
+          # Tag with git SHA (ensures unique, immutable tags)
           tags: delineate-hackathon-challenge:${{ github.sha }}
+          # Use GitHub Actions cache for Docker layers
           cache-from: type=gha
           cache-to: type=gha,mode=max

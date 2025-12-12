@@ -451,6 +451,143 @@ npm run docker:dev
 npm run docker:prod
 ```
 
+## CI/CD Pipeline
+
+### GitHub Actions Workflow
+
+This project includes an automated CI/CD pipeline that runs on every push and pull request to the `main` or `master` branch.
+
+**Pipeline Status:**
+![CI](https://github.com/Raihan-Naieem/cuet-micro-ops-hackthon-2025/workflows/CI/badge.svg)
+
+#### Pipeline Stages
+
+The workflow executes three stages in sequence:
+
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│    Lint     │───▶│    Test     │───▶│    Build    │
+│  (ESLint,   │    │   (E2E)     │    │  (Docker)   │
+│  Prettier)  │    │             │    │             │
+└─────────────┘    └─────────────┘    └─────────────┘
+   5-10 mins       10-20 mins         5-10 mins
+```
+
+##### Stage 1: Linting & Code Quality (5-10 minutes)
+
+Verifies code quality before any testing:
+
+```bash
+npm run lint          # ESLint - check code quality
+npm run format:check  # Prettier - verify code formatting
+```
+
+**Catches:**
+- Unused variables and imports
+- Code style violations
+- TypeScript type errors
+- Security issues
+
+**Fails the pipeline if:**
+- ESLint finds errors
+- Code isn't formatted according to Prettier rules
+- Any TypeScript type issues exist
+
+##### Stage 2: E2E Testing (10-20 minutes)
+
+Tests all API functionality with real requests:
+
+```bash
+npm run test:e2e
+```
+
+**Tests:**
+- Health check endpoint (`/health`)
+- Download initialization (`/v1/download/initiate`)
+- File availability checks (`/v1/download/check`)
+- Download processing (`/v1/download/start`)
+- Error handling and timeouts
+- Rate limiting behavior
+
+**Environment used:**
+- Mock S3 mode (no actual storage needed)
+- Development configuration
+- 30-second request timeout
+
+##### Stage 3: Docker Build (5-10 minutes)
+
+Builds and validates production Docker image:
+
+```bash
+docker build -f docker/Dockerfile.prod .
+```
+
+**Features:**
+- Builds production image (optimized, no dev tools)
+- Tags with Git SHA for immutability
+- Uses GitHub Actions cache for speed
+- Validates all dependencies included
+
+#### For Contributors
+
+Before pushing changes, run tests locally:
+
+```bash
+# Install dependencies
+npm install
+
+# Check linting
+npm run lint
+npm run format:check
+
+# Fix linting issues
+npm run lint:fix
+npm run format
+
+# Run E2E tests
+npm run test:e2e
+```
+
+#### Accessing Pipeline Status
+
+1. **In GitHub:** Go to Actions tab in the repository
+2. **In PR:** Check "Checks" section for pass/fail status
+3. **In Commits:** See green checkmark or red X next to commit
+
+#### Setting Up Your Own
+
+If you fork this repository, GitHub Actions is enabled by default:
+
+1. The workflow uses Node 24 on Ubuntu 24.04
+2. No additional secrets required for basic pipeline
+3. To enable Docker registry push:
+   - Add `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets
+   - Update workflow file with push step
+
+#### Troubleshooting Pipeline Failures
+
+**Lint fails:**
+```bash
+npm run lint:fix    # Auto-fix ESLint issues
+npm run format      # Auto-fix formatting issues
+git add .
+git commit -m "chore: lint fixes"
+git push
+```
+
+**E2E tests fail:**
+- Check that environment is clean (no extra services)
+- Ensure port 3000 is available
+- Run `npm ci` instead of `npm install`
+- Check error messages for specific test failures
+
+**Docker build fails:**
+- Verify Docker configuration in `docker/`
+- Check `package.json` for missing dependencies
+- Ensure all source files are committed to git
+
+---
+
 ## Environment Variables
 
 Create a `.env` file in the project root:
@@ -515,6 +652,7 @@ curl -X POST http://localhost:3000/v1/download/start \
 ## Available Scripts
 
 ```bash
+# Backend
 npm run dev          # Start dev server (5-15s delays, hot reload)
 npm run start        # Start production server (10-120s delays)
 npm run lint         # Run ESLint
@@ -522,8 +660,17 @@ npm run lint:fix     # Fix linting issues
 npm run format       # Format code with Prettier
 npm run format:check # Check code formatting
 npm run test:e2e     # Run E2E tests
+
+# Docker
 npm run docker:dev   # Start with Docker (development)
 npm run docker:prod  # Start with Docker (production)
+
+# Frontend
+cd frontend && npm run dev      # Start frontend dev server
+cd frontend && npm run build    # Build for production
+cd frontend && npm run preview  # Preview production build
+cd frontend && npm run lint     # Lint frontend code
+cd frontend && npm run type-check # Check TypeScript types
 ```
 
 ## Project Structure
@@ -531,22 +678,105 @@ npm run docker:prod  # Start with Docker (production)
 ```
 .
 ├── src/
-│   └── index.ts          # Main application entry point
+│   └── index.ts                  # Main application entry point
 ├── scripts/
-│   ├── e2e-test.ts       # E2E test suite
-│   └── run-e2e.ts        # Test runner with server management
+│   ├── e2e-test.ts              # E2E test suite
+│   └── run-e2e.ts               # Test runner with server management
 ├── docker/
-│   ├── Dockerfile.dev    # Development Dockerfile
-│   ├── Dockerfile.prod   # Production Dockerfile
-│   ├── compose.dev.yml   # Development Docker Compose
-│   └── compose.prod.yml  # Production Docker Compose
+│   ├── Dockerfile.dev           # Development Dockerfile
+│   ├── Dockerfile.prod          # Production Dockerfile
+│   ├── compose.dev.yml          # Development Docker Compose
+│   └── compose.prod.yml         # Production Docker Compose
 ├── .github/
 │   └── workflows/
-│       └── ci.yml        # GitHub Actions CI pipeline
+│       └── ci.yml               # GitHub Actions CI pipeline
+├── frontend/                     # React observability dashboard
+│   ├── src/
+│   │   ├── App.tsx              # Main app with Sentry error boundary
+│   │   ├── App.css              # Dashboard styles
+│   │   ├── main.tsx             # Entry point
+│   │   ├── lib/
+│   │   │   ├── telemetry.ts     # Sentry & OpenTelemetry setup
+│   │   │   └── api.ts           # HTTP client with tracing
+│   │   └── components/
+│   │       ├── HealthStatus.tsx # Health monitoring
+│   │       ├── DownloadManager.tsx # Download tracking
+│   │       ├── ErrorLog.tsx     # Error display
+│   │       └── TraceViewer.tsx  # Trace context
+│   ├── public/
+│   │   └── index.html           # HTML entry point
+│   ├── .env.example             # Environment template
+│   ├── README.md                # Frontend documentation
+│   ├── vite.config.ts           # Vite configuration
+│   ├── tsconfig.json            # TypeScript config
+│   └── package.json
+├── ARCHITECTURE.md              # Complete design documentation
 ├── package.json
 ├── tsconfig.json
 └── eslint.config.mjs
 ```
+
+## Frontend Observability Dashboard
+
+The `frontend/` directory contains a modern React-based observability dashboard for monitoring downloads and tracking errors.
+
+### Features
+
+- **Health Status**: Real-time API and storage health monitoring
+- **Download Manager**: Track multiple async downloads with progress bars
+- **Error Logging**: Sentry integration for real-time error tracking
+- **Trace Viewer**: Distributed tracing with OpenTelemetry
+- **Responsive Design**: Works on mobile, tablet, and desktop
+
+### Quick Start
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local
+# Edit .env.local with your Sentry DSN and API URL
+npm run dev
+# Open http://localhost:5173
+```
+
+### Key Components
+
+| Component | Purpose |
+|-----------|---------|
+| `HealthStatus` | Polls `/health` endpoint every 10s |
+| `DownloadManager` | Manage and track download jobs |
+| `ErrorLog` | Display Sentry errors in real-time |
+| `TraceViewer` | Show distributed trace context |
+
+### Environment Configuration
+
+```env
+VITE_API_URL=http://localhost:3000
+VITE_SENTRY_DSN=https://your-key@sentry.io/your-project-id
+VITE_JAEGER_URL=http://localhost:16686
+```
+
+See `frontend/README.md` for complete documentation.
+
+### Building for Production
+
+```bash
+cd frontend
+npm run build
+npm run preview  # Test production build
+```
+
+### Docker Integration
+
+The frontend is included in the Docker Compose setup:
+
+```bash
+npm run docker:dev
+# Frontend at http://localhost:5173
+# Backend at http://localhost:3000
+```
+
+---
 
 ## Security Features
 
@@ -557,6 +787,18 @@ npm run docker:prod  # Start with Docker (production)
 - Input validation with Zod schemas
 - Path traversal prevention for S3 keys
 - Graceful shutdown handling
+- Sentry Error Boundary for React error handling
+- Automatic trace context propagation
+
+---
+
+## Documentation
+
+- **[ARCHITECTURE.md](./ARCHITECTURE.md)**: Complete design patterns and implementation guide for Challenge 2
+- **[frontend/README.md](./frontend/README.md)**: Frontend dashboard documentation
+- **[frontend/IMPLEMENTATION_GUIDE.md](./frontend/IMPLEMENTATION_GUIDE.md)**: Detailed frontend implementation guide
+
+---
 
 ## License
 

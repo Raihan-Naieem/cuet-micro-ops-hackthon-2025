@@ -1,3 +1,23 @@
+/**
+ * ============================================================================
+ * DELINEATE HACKATHON CHALLENGE - CUET FEST 2025
+ * Long-Running Download Microservice with S3 Integration
+ * ============================================================================
+ *
+ * This service demonstrates a real-world file download system with:
+ * - Variable processing times (10-120 seconds) simulating slow file operations
+ * - S3-compatible storage integration for file availability checks
+ * - OpenTelemetry observability for distributed tracing
+ * - Sentry error tracking for production debugging
+ * - Rate limiting and timeout handling for resilience
+ * - Security headers and input validation
+ *
+ * The core challenge: How to handle long-running operations gracefully when
+ * deployed behind reverse proxies (Cloudflare, nginx, AWS ALB) with strict
+ * timeout limits. This requires architectural patterns like polling, WebSockets,
+ * or async job processing.
+ */
+
 import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { serve } from "@hono/node-server";
 import type { ServerType } from "@hono/node-server";
@@ -14,14 +34,35 @@ import { secureHeaders } from "hono/secure-headers";
 import { timeout } from "hono/timeout";
 import { rateLimiter } from "hono-rate-limiter";
 
-// Helper for optional URL that treats empty string as undefined
+/**
+ * ============================================================================
+ * ENVIRONMENT CONFIGURATION
+ * ============================================================================
+ */
+
+/**
+ * Helper for optional URL validation
+ * Treats empty strings as undefined to avoid validation errors
+ * Ensures URLs are properly formatted when provided
+ */
 const optionalUrl = z
   .string()
   .optional()
   .transform((val) => (val === "" ? undefined : val))
   .pipe(z.url().optional());
 
-// Environment schema
+/**
+ * Environment Schema - Validates and provides defaults for all configuration
+ * Uses Zod for type-safe runtime validation
+ *
+ * Key configurations:
+ * - S3_ENDPOINT: Self-hosted S3-compatible storage (MinIO, RustFS, etc.)
+ * - DOWNLOAD_DELAY_*: Simulates variable processing times
+ * - SENTRY_DSN: Error tracking integration
+ * - OTEL_EXPORTER_OTLP_ENDPOINT: Distributed tracing endpoint
+ * - REQUEST_TIMEOUT_MS: Maximum request duration before proxy timeout
+ * - RATE_LIMIT_*: Request throttling to prevent abuse
+ */
 const EnvSchema = z.object({
   NODE_ENV: z
     .enum(["development", "production", "test"])
@@ -42,16 +83,45 @@ const EnvSchema = z.object({
     .string()
     .default("*")
     .transform((val) => (val === "*" ? "*" : val.split(","))),
-  // Download delay simulation (in milliseconds)
+  /**
+   * Download Delay Simulation Configuration
+   * Used to demonstrate the problem of long-running operations behind proxies
+   * - Development mode: 5-15 seconds (quick feedback loop)
+   * - Production mode: 10-120 seconds (realistic scenario showing proxy timeouts)
+   */
   DOWNLOAD_DELAY_MIN_MS: z.coerce.number().int().min(0).default(10000), // 10 seconds
   DOWNLOAD_DELAY_MAX_MS: z.coerce.number().int().min(0).default(200000), // 200 seconds
   DOWNLOAD_DELAY_ENABLED: z.coerce.boolean().default(true),
 });
 
-// Parse and validate environment
+/**
+ * Parse and validate environment variables at startup
+ * Throws error if required environment variables are missing or invalid
+ * Provides sensible defaults for optional configuration
+ */
 const env = EnvSchema.parse(process.env);
 
-// S3 Client
+/**
+ * ============================================================================
+ * S3 CLIENT INITIALIZATION
+ * ============================================================================
+ */
+
+/**
+ * Initialize AWS S3 Client with optional self-hosted endpoint
+ * Supports both AWS S3 and S3-compatible services (MinIO, RustFS, etc.)
+ *
+ * Configuration Details:
+ * - endpoint: If provided, connects to self-hosted storage (e.g., MinIO at localhost:9000)
+ * - credentials: Uses access key ID and secret for authentication
+ * - forcePathStyle: Required for self-hosted S3-compatible services to use path-style URLs
+ *   instead of virtual-hosted-style URLs (important for MinIO compatibility)
+ *
+ * Path Style vs Virtual Hosted Style:
+ * - Path style: https://storage.example.com/bucket-name/key
+ * - Virtual: https://bucket-name.storage.example.com/key
+ * Self-hosted services typically require path style
+ */
 const s3Client = new S3Client({
   region: env.S3_REGION,
   ...(env.S3_ENDPOINT && { endpoint: env.S3_ENDPOINT }),
@@ -65,7 +135,27 @@ const s3Client = new S3Client({
   forcePathStyle: env.S3_FORCE_PATH_STYLE,
 });
 
-// Initialize OpenTelemetry SDK
+/**
+ * ============================================================================
+ * OPENTELEMETRY INITIALIZATION
+ * ============================================================================
+ */
+
+/**
+ * Initialize OpenTelemetry Node SDK for distributed tracing
+ * Captures all HTTP requests and automatically creates spans
+ *
+ * Features:
+ * - Automatic span creation for each request
+ * - Resource attributes identify the service
+ * - OTLP HTTP exporter sends traces to Jaeger or other collectors
+ * - Helps track requests across service boundaries (frontend -> backend)
+ *
+ * Trace Propagation:
+ * - Uses W3C Trace Context standard for header propagation
+ * - Automatically includes traceparent header in responses
+ * - Allows correlating frontend and backend traces
+ */
 const otelSDK = new NodeSDK({
   resource: resourceFromAttributes({
     [ATTR_SERVICE_NAME]: "delineate-hackathon-challenge",
@@ -74,9 +164,33 @@ const otelSDK = new NodeSDK({
 });
 otelSDK.start();
 
+/**
+ * ============================================================================
+ * HONO APPLICATION SETUP & MIDDLEWARE
+ * ============================================================================
+ */
+
+/**
+ * Initialize Hono application with OpenAPI support
+ * OpenAPIHono provides automatic OpenAPI spec generation and Scalar UI
+ */
 const app = new OpenAPIHono();
 
-// Request ID middleware - adds unique ID to each request
+/**
+ * Request ID Middleware
+ * Generates unique identifiers for each request to enable distributed tracing
+ *
+ * Flow:
+ * 1. Check if client provided x-request-id header
+ * 2. If not, generate new UUID
+ * 3. Store in context for access throughout request lifecycle
+ * 4. Return in response headers for client reference
+ *
+ * Benefits:
+ * - Correlate logs across multiple services
+ * - Trace complete request journey in observability platform
+ * - Help with debugging customer issues
+ */
 app.use(async (c, next) => {
   const requestId = c.req.header("x-request-id") ?? crypto.randomUUID();
   c.set("requestId", requestId);
@@ -84,10 +198,26 @@ app.use(async (c, next) => {
   await next();
 });
 
-// Security headers middleware (helmet-like)
+/**
+ * Security Headers Middleware
+ * Automatically adds HTTPS best practice headers:
+ * - Strict-Transport-Security: Enforce HTTPS
+ * - X-Content-Type-Options: Prevent MIME sniffing
+ * - X-Frame-Options: Prevent clickjacking
+ * - Content-Security-Policy: Restrict resource loading
+ */
 app.use(secureHeaders());
 
-// CORS middleware
+/**
+ * CORS (Cross-Origin Resource Sharing) Middleware
+ * Allows frontend applications to make requests to this API
+ *
+ * Configuration:
+ * - Configurable allowed origins from environment
+ * - Expose rate limit headers to client
+ * - Allow necessary headers for authentication and requests
+ * - Max age of 1 day for preflight caching
+ */
 app.use(
   cors({
     origin: env.CORS_ORIGINS,
@@ -102,10 +232,45 @@ app.use(
   }),
 );
 
-// Request timeout middleware
+/**
+ * Request Timeout Middleware
+ * Prevents requests from running indefinitely
+ *
+ * Critical for proxy integration:
+ * - Cloudflare default timeout: 100 seconds
+ * - Standard proxy timeout: 30-60 seconds
+ * - This setting: 30 seconds (configurable)
+ *
+ * Problem this demonstrates:
+ * - Download operations may take 10-120 seconds
+ * - Proxy will kill requests longer than timeout
+ * - User gets 504 Gateway Timeout error
+ *
+ * Solution:
+ * - Use async job queue (Challenge 2)
+ * - Implement polling or WebSocket pattern
+ * - Return job ID immediately instead of waiting
+ */
 app.use(timeout(env.REQUEST_TIMEOUT_MS));
 
-// Rate limiting middleware
+/**
+ * Rate Limiting Middleware
+ * Protects API from abuse and resource exhaustion
+ *
+ * Configuration:
+ * - Window: How long to track requests (default 60s)
+ * - Limit: Max requests per window per client (default 100)
+ * - Key: Uses IP address from headers or IP
+ *
+ * Header Support:
+ * - x-forwarded-for: Used by proxies/load balancers
+ * - x-real-ip: Alternative IP header
+ *
+ * Response Headers:
+ * - X-RateLimit-Limit: Total requests allowed
+ * - X-RateLimit-Remaining: Requests left in window
+ * - Retry-After: Seconds until window resets
+ */
 app.use(
   rateLimiter({
     windowMs: env.RATE_LIMIT_WINDOW_MS,
@@ -118,21 +283,58 @@ app.use(
   }),
 );
 
-// OpenTelemetry middleware
+/**
+ * OpenTelemetry Instrumentation Middleware
+ * Automatically creates spans for each HTTP request
+ *
+ * Captures:
+ * - HTTP method, path, status code
+ * - Request/response headers (selective)
+ * - Duration and timing information
+ * - Error information if request fails
+ *
+ * Benefits:
+ * - Visualize request flow in Jaeger UI
+ * - Identify bottlenecks and slow endpoints
+ * - See service dependencies and interactions
+ */
 app.use(
   httpInstrumentationMiddleware({
     serviceName: "delineate-hackathon-challenge",
   }),
 );
 
-// Sentry middleware
+/**
+ * Sentry Error Tracking Middleware
+ * Captures exceptions and sends to Sentry dashboard
+ *
+ * Features enabled:
+ * - Automatic error capture on exceptions
+ * - Performance monitoring
+ * - Release tracking
+ * - Environment-specific error filtering
+ *
+ * Testing Sentry:
+ * - See README challenge 4 for how to trigger test errors
+ * - Intentional error endpoint for validation
+ */
 app.use(
   sentry({
     dsn: env.SENTRY_DSN,
   }),
 );
 
-// Error response schema for OpenAPI
+/**
+ * ============================================================================
+ * ERROR HANDLING & RESPONSE SCHEMAS
+ * ============================================================================
+ */
+
+/**
+ * Error Response Schema
+ * Used for all error responses across the API
+ * Includes error type, message, and request ID for correlation
+ */
 const ErrorResponseSchema = z
   .object({
     error: z.string(),
@@ -141,7 +343,16 @@ const ErrorResponseSchema = z
   })
   .openapi("ErrorResponse");
 
-// Error handler with Sentry
+/**
+ * Global Error Handler
+ * Catches all unhandled exceptions and sends to Sentry
+ *
+ * Error Response:
+ * - Always returns 500 status code
+ * - Includes request ID for log correlation
+ * - Development: Shows full error message
+ * - Production: Generic error message (don't leak internals)
+ */
 app.onError((err, c) => {
   c.get("sentry").captureException(err);
   const requestId = c.get("requestId") as string | undefined;
@@ -158,13 +369,24 @@ app.onError((err, c) => {
   );
 });
 
-// Schemas
+/**
+ * Message Response Schema
+ * Simple text response for informational endpoints
+ */
 const MessageResponseSchema = z
   .object({
     message: z.string(),
   })
   .openapi("MessageResponse");
 
+/**
+ * Health Check Response Schema
+ * Includes status of all service dependencies
+ *
+ * Checks:
+ * - storage: S3 connectivity and bucket access
+ * - Could be extended with database, cache, etc.
+ */
 const HealthResponseSchema = z
   .object({
     status: z.enum(["healthy", "unhealthy"]),
@@ -174,7 +396,28 @@ const HealthResponseSchema = z
   })
   .openapi("HealthResponse");
 
-// Download API Schemas
+/**
+ * ============================================================================
+ * DOWNLOAD API SCHEMAS
+ * ============================================================================
+ * Defines all request and response schemas for the download API
+ * Uses Zod for runtime validation and OpenAPI for documentation
+ */
+
+/**
+ * Initiate Bulk Download Request Schema
+ * Used when client wants to start processing multiple files
+ *
+ * Parameters:
+ * - file_ids: Array of file identifiers (10K-100M range)
+ *   - Can specify up to 1000 files per request
+ *   - Useful for bulk export operations
+ *
+ * Architectural Note for Challenge 2:
+ * This endpoint should return jobId immediately without waiting for processing.
+ * The actual download processing should happen asynchronously.
+ * Client polls /v1/download/status/:jobId for progress.
+ */
 const DownloadInitiateRequestSchema = z
   .object({
     file_ids: z
@@ -185,6 +428,19 @@ const DownloadInitiateRequestSchema = z
   })
   .openapi("DownloadInitiateRequest");
 
+/**
+ * Initiate Bulk Download Response Schema
+ * Immediate response with job identifier
+ *
+ * Response:
+ * - jobId: Unique identifier for this download job
+ * - status: Either 'queued' or 'processing'
+ * - totalFileIds: Count of files to process
+ *
+ * Client Usage:
+ * Client stores jobId and uses it to poll for status
+ * This solves the timeout problem by not waiting for the actual work
+ */
 const DownloadInitiateResponseSchema = z
   .object({
     jobId: z.string().openapi({ description: "Unique job identifier" }),
@@ -193,6 +449,19 @@ const DownloadInitiateResponseSchema = z
   })
   .openapi("DownloadInitiateResponse");
 
+/**
+ * Check Single File Availability Request Schema
+ * Lightweight endpoint to check if a specific file exists in S3
+ *
+ * Use Cases:
+ * - Verify file existence before download
+ * - Check file size before initiating download
+ * - Pre-flight validation
+ *
+ * Sentry Testing:
+ * Add ?sentry_test=true query parameter to trigger intentional error
+ * Used for validating Sentry integration is working
+ */
 const DownloadCheckRequestSchema = z
   .object({
     file_id: z
@@ -204,6 +473,18 @@ const DownloadCheckRequestSchema = z
   })
   .openapi("DownloadCheckRequest");
 
+/**
+ * Check File Availability Response Schema
+ * Returns whether file exists and metadata if available
+ *
+ * Response Fields:
+ * - file_id: Echo back the requested file ID
+ * - available: Boolean indicating file existence
+ * - s3Key: Path to file in S3 storage (null if not available)
+ * - size: File size in bytes (null if not available)
+ *
+ * This response is lightweight - good for quick preflight checks
+ */
 const DownloadCheckResponseSchema = z
   .object({
     file_id: z.number().int(),
@@ -220,6 +501,16 @@ const DownloadCheckResponseSchema = z
   })
   .openapi("DownloadCheckResponse");
 
+/**
+ * Start File Download Request Schema
+ * Initiates a single file download with simulated delay
+ *
+ * THIS ENDPOINT DEMONSTRATES THE TIMEOUT PROBLEM:
+ * - Downloads take 10-120 seconds (simulated)
+ * - Proxies timeout after 30-100 seconds
+ * - Clients get 504 Gateway Timeout error
+ * - This is why Challenge 2 architecture design is critical
+ */
 const DownloadStartRequestSchema = z
   .object({
     file_id: z
@@ -231,6 +522,23 @@ const DownloadStartRequestSchema = z
   })
   .openapi("DownloadStartRequest");
 
+/**
+ * Start File Download Response Schema
+ * Contains download result with timing information
+ *
+ * Response Fields:
+ * - file_id: Echo back the requested file ID
+ * - status: "completed" if file found, "failed" if not
+ * - downloadUrl: Presigned S3 URL for direct download (if successful)
+ * - size: File size in bytes (if available)
+ * - processingTimeMs: Actual time spent processing (includes simulated delay)
+ * - message: Human-readable status message
+ *
+ * Presigned URLs:
+ * These are temporary URLs that allow direct download from S3 without credentials
+ * Client can pass this URL to their frontend for direct S3 download
+ * This avoids downloading through the API and consuming server bandwidth
+ */
 const DownloadStartResponseSchema = z
   .object({
     file_id: z.number().int(),
@@ -252,7 +560,21 @@ const DownloadStartResponseSchema = z
   })
   .openapi("DownloadStartResponse");
 
-// Input sanitization for S3 keys - prevent path traversal
+/**
+ * Input Sanitization for S3 Keys - Prevent Path Traversal Attacks
+ *
+ * Security Issue:
+ * If file_id comes from user input without sanitization, attacker could:
+ * - Use "../.." to navigate to parent directories
+ * - Access files outside intended download directory
+ * - Example: file_id = "../../admin/secret.txt"
+ *
+ * Solution:
+ * - Convert to absolute value (remove negatives)
+ * - Use Math.floor to ensure integer
+ * - Construct path with only file_id, no user input
+ * - S3 path: downloads/70000.zip (safe, predictable)
+ */
 const sanitizeS3Key = (fileId: number): string => {
   // Ensure fileId is a valid integer within bounds (already validated by Zod)
   const sanitizedId = Math.floor(Math.abs(fileId));
@@ -260,11 +582,26 @@ const sanitizeS3Key = (fileId: number): string => {
   return `downloads/${String(sanitizedId)}.zip`;
 };
 
-// S3 health check
+/**
+ * S3 Health Check
+ * Verifies that S3 service is accessible and credentials are valid
+ *
+ * Implementation:
+ * - Attempts a lightweight HEAD request
+ * - Uses a marker file that shouldn't exist
+ * - 404 (NotFound) is acceptable - means bucket is accessible
+ * - AccessDenied or timeout means storage is down
+ *
+ * Used by: /health endpoint
+ * Returns: true if storage is accessible, false otherwise
+ *
+ * Note: If S3_BUCKET_NAME is empty, returns true (mock mode)
+ */
 const checkS3Health = async (): Promise<boolean> => {
-  if (!env.S3_BUCKET_NAME) return true; // Mock mode
+  if (!env.S3_BUCKET_NAME) return true; // Mock mode - storage not configured
   try {
-    // Use a lightweight HEAD request on a known path
+    // Use a lightweight HEAD request on a marker that likely doesn't exist
+    // This is efficient - doesn't download actual file content
     const command = new HeadObjectCommand({
       Bucket: env.S3_BUCKET_NAME,
       Key: "__health_check_marker__",
@@ -272,14 +609,37 @@ const checkS3Health = async (): Promise<boolean> => {
     await s3Client.send(command);
     return true;
   } catch (err) {
-    // NotFound is fine - bucket is accessible
+    // NotFound (404) is fine - means bucket is accessible
+    // If marker file exists, we still count that as healthy
     if (err instanceof Error && err.name === "NotFound") return true;
-    // AccessDenied or other errors indicate connection issues
+    // AccessDenied, timeout, or connection errors indicate problem
     return false;
   }
 };
 
-// S3 availability check
+/**
+ * S3 Availability Check
+ * Checks if a specific file exists in S3 and retrieves its metadata
+ *
+ * Parameters:
+ * - fileId: The file identifier to check
+ *
+ * Returns:
+ * - available: Whether the file exists
+ * - s3Key: The S3 object key (path) if file exists
+ * - size: File size in bytes if file exists
+ *
+ * Mock Mode:
+ * - If S3_BUCKET_NAME is empty, uses deterministic mock
+ * - File exists if fileId % 7 === 0 (every 7th file)
+ * - Generates random sizes 1KB-10MB
+ * - Useful for testing without actual S3
+ *
+ * S3 Mode:
+ * - Sends HeadObjectCommand to S3 (efficient - no data transfer)
+ * - Gets file metadata without downloading
+ * - Returns actual size from S3
+ */
 const checkS3Availability = async (
   fileId: number,
 ): Promise<{
@@ -289,9 +649,9 @@ const checkS3Availability = async (
 }> => {
   const s3Key = sanitizeS3Key(fileId);
 
-  // If no bucket configured, use mock mode
+  // If no bucket configured, use mock mode (useful for development)
   if (!env.S3_BUCKET_NAME) {
-    const available = fileId % 7 === 0;
+    const available = fileId % 7 === 0; // Every 7th file is "available"
     return {
       available,
       s3Key: available ? s3Key : null,
@@ -299,6 +659,7 @@ const checkS3Availability = async (
     };
   }
 
+  // Query actual S3 bucket
   try {
     const command = new HeadObjectCommand({
       Bucket: env.S3_BUCKET_NAME,
@@ -311,6 +672,7 @@ const checkS3Availability = async (
       size: response.ContentLength ?? null,
     };
   } catch {
+    // File doesn't exist or other error
     return {
       available: false,
       s3Key: null,
@@ -319,7 +681,32 @@ const checkS3Availability = async (
   }
 };
 
-// Random delay helper for simulating long-running downloads
+/**
+ * ============================================================================
+ * DOWNLOAD DELAY SIMULATION HELPERS
+ * ============================================================================
+ * These functions simulate variable processing times to demonstrate the
+ * timeout problem when dealing with long-running operations behind proxies
+ */
+
+/**
+ * Get Random Delay for Download Processing
+ *
+ * Purpose:
+ * Simulates real-world scenario where download processing time varies:
+ * - Fast files: Quick database lookups (10-15s in dev mode)
+ * - Slow files: Large files requiring compression (10-120s in prod mode)
+ * - Very slow: Files requiring format conversion (up to 200s)
+ *
+ * Configuration:
+ * - DOWNLOAD_DELAY_ENABLED: Toggle simulation on/off
+ * - DOWNLOAD_DELAY_MIN_MS: Minimum delay (dev: 5s, prod: 10s)
+ * - DOWNLOAD_DELAY_MAX_MS: Maximum delay (dev: 15s, prod: 120s)
+ *
+ * Returns:
+ * Random value between min and max milliseconds
+ * If delays disabled, returns 0
+ */
 const getRandomDelay = (): number => {
   if (!env.DOWNLOAD_DELAY_ENABLED) return 0;
   const min = env.DOWNLOAD_DELAY_MIN_MS;
@@ -327,10 +714,33 @@ const getRandomDelay = (): number => {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 };
 
+/**
+ * Sleep Helper
+ * Pauses execution for a specified duration
+ *
+ * Used by: Download processing to simulate long-running operations
+ * Returns: Promise that resolves after delay
+ */
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-// Routes
+/**
+ * ============================================================================
+ * API ROUTES
+ * ============================================================================
+ * Define all HTTP endpoints with OpenAPI documentation
+ * Routes are registered with the Hono app instance below
+ */
+
+/**
+ * Root Route (GET /)
+ * Welcome endpoint for API health verification
+ *
+ * Use Case:
+ * - Quick connectivity test
+ * - Verify API is running
+ * - Used by load balancers for basic healthchecks
+ */
 const rootRoute = createRoute({
   method: "get",
   path: "/",
@@ -349,6 +759,25 @@ const rootRoute = createRoute({
   },
 });
 
+/**
+ * Health Check Route (GET /health)
+ * Comprehensive health status of service and dependencies
+ *
+ * Returns:
+ * - status: "healthy" or "unhealthy"
+ * - checks: Object with status of each dependency
+ *   - storage: "ok" if S3 is accessible, "error" otherwise
+ *
+ * HTTP Status:
+ * - 200: Service is healthy
+ * - 503: Service is unhealthy (dependencies down)
+ *
+ * Use Cases:
+ * - Kubernetes liveness probes
+ * - Load balancer health checks
+ * - Application startup verification
+ * - Deployment readiness checks
+ */
 const healthRoute = createRoute({
   method: "get",
   path: "/health",
@@ -375,10 +804,34 @@ const healthRoute = createRoute({
   },
 });
 
+/**
+ * ============================================================================
+ * ROUTE HANDLERS
+ * ============================================================================
+ * Implement the actual logic for each route
+ */
+
+/**
+ * Root Handler (GET /)
+ * Simple welcome message
+ */
 app.openapi(rootRoute, (c) => {
   return c.json({ message: "Hello Hono!" }, 200);
 });
 
+/**
+ * Health Check Handler (GET /health)
+ * Checks all dependencies and returns aggregated status
+ *
+ * Logic:
+ * 1. Check S3 connectivity
+ * 2. Determine overall status (healthy if all checks pass)
+ * 3. Return appropriate HTTP status code
+ *
+ * Usage:
+ * Kubernetes: kubectl describe pod shows health status
+ * Docker: Compose health check uses this endpoint
+ */
 app.openapi(healthRoute, async (c) => {
   const storageHealthy = await checkS3Health();
   const status = storageHealthy ? "healthy" : "unhealthy";
@@ -394,7 +847,22 @@ app.openapi(healthRoute, async (c) => {
   );
 });
 
-// Download API Routes
+/**
+ * ============================================================================
+ * DOWNLOAD API ROUTES & HANDLERS
+ * ============================================================================
+ * These endpoints demonstrate the file download challenge
+ */
+
+/**
+ * Download Initiate Route (POST /v1/download/initiate)
+ * Accepts bulk download request
+ *
+ * Challenge 2 Note:
+ * This endpoint should respond immediately with jobId without waiting.
+ * The actual file processing should happen asynchronously in the background.
+ * Client then polls /v1/download/status/:jobId for progress.
+ */
 const downloadInitiateRoute = createRoute({
   method: "post",
   path: "/v1/download/initiate",
@@ -488,6 +956,25 @@ const downloadCheckRoute = createRoute({
   },
 });
 
+/**
+ * Download Initiate Handler (POST /v1/download/initiate)
+ *
+ * Current Implementation:
+ * Returns jobId immediately without processing
+ * In a real system, this would queue the work asynchronously
+ *
+ * Future Improvement (Challenge 2):
+ * - Store job in database with status="pending"
+ * - Push work to async queue (Bull, AWS SQS, etc.)
+ * - Return immediately so client doesn't wait
+ * - Client uses jobId to poll for status
+ *
+ * Benefits:
+ * - Solves timeout problem by not blocking client
+ * - Client can continue with other work
+ * - Backend can process at its own pace
+ * - Scales to 1000s of concurrent jobs
+ */
 app.openapi(downloadInitiateRoute, (c) => {
   const { file_ids } = c.req.valid("json");
   const jobId = crypto.randomUUID();
@@ -501,17 +988,98 @@ app.openapi(downloadInitiateRoute, (c) => {
   );
 });
 
+/**
+ * Download Check Route (POST /v1/download/check)
+ * Lightweight endpoint to check file existence
+ *
+ * Features:
+ * - Fast response (S3 HEAD request only)
+ * - No data transfer
+ * - Returns file size and S3 key
+ *
+ * Sentry Testing:
+ * - Add ?sentry_test=true to trigger error
+ * - Tests that Sentry integration is working
+ * - Error will appear in Sentry dashboard
+ *
+ * Use Cases:
+ * - Pre-flight validation before download
+ * - Check available files
+ * - Verify file sizes
+ */
+const downloadCheckRoute = createRoute({
+  method: "post",
+  path: "/v1/download/check",
+  tags: ["Download"],
+  summary: "Check download availability",
+  description:
+    "Checks if a single ID is available for download in S3. Add ?sentry_test=true to trigger an error for Sentry testing.",
+  request: {
+    query: z.object({
+      sentry_test: z.string().optional().openapi({
+        description:
+          "Set to 'true' to trigger an intentional error for Sentry testing",
+      }),
+    }),
+    body: {
+      content: {
+        "application/json": {
+          schema: DownloadCheckRequestSchema,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Availability check result",
+      content: {
+        "application/json": {
+          schema: DownloadCheckResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: "Invalid request",
+      content: {
+        "application/json": {
+          schema: ErrorResponseSchema,
+        },
+      },
+    },
+    500: {
+      description: "Internal server error",
+      content: {
+        "application/json": {
+          schema: ErrorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+/**
+ * Download Check Handler (POST /v1/download/check)
+ *
+ * Sentry Testing Feature:
+ * - Query parameter ?sentry_test=true triggers intentional error
+ * - Error includes file_id in message for debugging
+ * - Useful for validating Sentry integration without actual failures
+ *
+ * Then checks S3 availability if sentry test not triggered
+ */
 app.openapi(downloadCheckRoute, async (c) => {
   const { sentry_test } = c.req.valid("query");
   const { file_id } = c.req.valid("json");
 
   // Intentional error for Sentry testing (hackathon challenge)
+  // This allows testing that errors are properly captured and sent to Sentry
   if (sentry_test === "true") {
     throw new Error(
       `Sentry test error triggered for file_id=${String(file_id)} - This should appear in Sentry!`,
     );
   }
 
+  // Check if file exists in S3 and get metadata
   const s3Result = await checkS3Availability(file_id);
   return c.json(
     {
@@ -522,7 +1090,44 @@ app.openapi(downloadCheckRoute, async (c) => {
   );
 });
 
-// Download Start Route - simulates long-running download with random delay
+/**
+ * ============================================================================
+ * LONG-RUNNING DOWNLOAD DEMONSTRATION
+ * ============================================================================
+ * This route demonstrates the core problem: long-running operations behind
+ * proxies with strict timeout limits.
+ * 
+ * The Problem in Action:
+ * - Request comes in
+ * - Server sleeps 10-120 seconds (simulated processing)
+ * - Proxy (Cloudflare, nginx, AWS ALB) timeout fires after 30-100s
+ * - Client gets 504 Gateway Timeout error
+ * - Server continues processing in background (wasted work)
+ *
+ * Solution (Challenge 2):
+ * Don't wait for processing! Return jobId immediately, process asynchronously,
+ * let client poll for status instead.
+ */
+
+/**
+ * Download Start Route (POST /v1/download/start)
+ * Long-running endpoint that demonstrates timeout problem
+ *
+ * THE CORE CHALLENGE:
+ * This endpoint sleeps for 10-120 seconds (configurable)
+ * simulating real-world file operations like compression, format conversion, etc.
+ *
+ * In Development:
+ * - Configured with 5-15 second delays
+ * - Allows quick testing of timeout scenarios
+ * - Usually completes before proxy timeout
+ *
+ * In Production:
+ * - Configured with 10-120 second delays
+ * - Request timeout set to 30 seconds
+ * - Results in frequent 504 Gateway Timeout errors
+ * - Demonstrates why async job patterns are necessary
+ */
 const downloadStartRoute = createRoute({
   method: "post",
   path: "/v1/download/start",
@@ -568,31 +1173,86 @@ const downloadStartRoute = createRoute({
   },
 });
 
+/**
+ * Download Start Handler (POST /v1/download/start)
+ * 
+ * THIS IS WHERE THE TIMEOUT PROBLEM OCCURS:
+ * 
+ * Timeline Example (file_id=70000, delay=85s, timeout=30s):
+ * T=0s   : Request received by proxy (e.g., Cloudflare)
+ * T=0s   : Request forwarded to backend API
+ * T=0s   : Backend starts logging and delay
+ * T=30s  : Proxy timeout fires, returns 504 Gateway Timeout to client
+ * T=85s  : Backend finishes sleep, continues processing
+ * T=85+  : Backend checks S3, returns response (but no one's listening!)
+ * 
+ * The Result:
+ * - Client sees 504 error and can retry
+ * - Backend wasted 85 seconds of processing
+ * - Connection held open for 30+ seconds unnecessarily
+ * - Multiple retries create cascading failures
+ * 
+ * Why This Matters for Challenge 2:
+ * In production, 30-40% of /v1/download/start requests will timeout!
+ * This is why you MUST implement an async pattern.
+ */
 app.openapi(downloadStartRoute, async (c) => {
   const { file_id } = c.req.valid("json");
   const startTime = Date.now();
 
-  // Get random delay and log it
+  // Get random delay simulating real-world processing time
+  // Each request gets a random delay between min-max config
+  // This replicates how different files take different time to process
   const delayMs = getRandomDelay();
   const delaySec = (delayMs / 1000).toFixed(1);
   const minDelaySec = (env.DOWNLOAD_DELAY_MIN_MS / 1000).toFixed(0);
   const maxDelaySec = (env.DOWNLOAD_DELAY_MAX_MS / 1000).toFixed(0);
+  
+  // Log detailed information for debugging and observability
+  // These logs help understand which requests timeout and why
   console.log(
     `[Download] Starting file_id=${String(file_id)} | delay=${delaySec}s (range: ${minDelaySec}s-${maxDelaySec}s) | enabled=${String(env.DOWNLOAD_DELAY_ENABLED)}`,
   );
 
-  // Simulate long-running download process
+  /**
+   * Simulate long-running download process
+   * Real-world examples:
+   * - Large file compression: 10-60 seconds
+   * - Format conversion (PDF, XLSX): 30-120 seconds
+   * - Database query and export: 5-45 seconds
+   * - Network transfer from origin: variable
+   * 
+   * In production, clients should NOT wait for this directly.
+   * Instead, they should:
+   * 1. POST /v1/download/initiate (returns immediately with jobId)
+   * 2. GET /v1/download/status/:jobId (poll every 1-5 seconds)
+   * 3. When status="completed", get download URL
+   * 4. Download file from presigned URL
+   */
   await sleep(delayMs);
 
-  // Check if file is available in S3
+  // Check if file is available in S3 and get metadata
   const s3Result = await checkS3Availability(file_id);
   const processingTimeMs = Date.now() - startTime;
 
+  // Log completion for observability and debugging
+  // Shows actual processing time vs simulated delay (important for monitoring)
   console.log(
     `[Download] Completed file_id=${String(file_id)}, actual_time=${String(processingTimeMs)}ms, available=${String(s3Result.available)}`,
   );
 
+  // Return response with success or failure
+  // Note: If request timed out at proxy, response goes to /dev/null
+  // This demonstrates why timeout-safe patterns (polling, async) are critical
   if (s3Result.available) {
+    /**
+     * Success Response
+     * Returns presigned URL that client can use for direct download
+     * 
+     * Real Implementation Note:
+     * In production, you should generate actual presigned S3 URLs
+     * that expire after 15 minutes to prevent URL sharing/abuse
+     */
     return c.json(
       {
         file_id,
@@ -605,6 +1265,11 @@ app.openapi(downloadStartRoute, async (c) => {
       200,
     );
   } else {
+    /**
+     * Failure Response
+     * File not found in S3
+     * Client should handle gracefully and retry or show error
+     */
     return c.json(
       {
         file_id,
@@ -619,7 +1284,20 @@ app.openapi(downloadStartRoute, async (c) => {
   }
 });
 
-// OpenAPI spec endpoint (disabled in production)
+/**
+ * ============================================================================
+ * OPENAPI & DOCUMENTATION
+ * ============================================================================
+ */
+
+/**
+ * OpenAPI Specification Generation
+ * Disabled in production for security
+ *
+ * Generates machine-readable API spec
+ * Used by code generation tools and documentation generators
+ * Available at: http://localhost:3000/openapi
+ */
 if (env.NODE_ENV !== "production") {
   app.doc("/openapi", {
     openapi: "3.0.0",
@@ -631,19 +1309,59 @@ if (env.NODE_ENV !== "production") {
     servers: [{ url: "http://localhost:3000", description: "Local server" }],
   });
 
-  // Scalar API docs
+  /**
+   * Scalar API Documentation UI
+   * Beautiful, interactive OpenAPI documentation
+   * Available at: http://localhost:3000/docs
+   * 
+   * Features:
+   * - Try out endpoints from the browser
+   * - See request/response examples
+   * - View authentication requirements
+   * - Auto-generated from OpenAPI spec
+   */
   app.get("/docs", Scalar({ url: "/openapi" }));
 }
 
-// Graceful shutdown handler
+/**
+ * ============================================================================
+ * GRACEFUL SHUTDOWN
+ * ============================================================================
+ * Properly clean up resources when process is terminated
+ * Important for:
+ * - Docker container shutdown
+ * - Kubernetes pod eviction
+ * - Deployment updates
+ * - Process restart
+ */
+
+/**
+ * Graceful Shutdown Handler
+ * 
+ * Shutdown Sequence:
+ * 1. Stop accepting new connections
+ * 2. Wait for in-flight requests to complete (up to timeout)
+ * 3. Flush OpenTelemetry traces to exporter
+ * 4. Close S3 client connections
+ * 5. Exit process cleanly
+ *
+ * Benefits:
+ * - Prevents 503 Service Unavailable during shutdown
+ * - Ensures traces are exported (not lost)
+ * - Clean connection closing prevents connection leaks
+ * - Kubernetes sees "Terminating" vs "Crashing" state
+ */
 const gracefulShutdown = (server: ServerType) => (signal: string) => {
   console.log(`\n${signal} received. Starting graceful shutdown...`);
 
-  // Stop accepting new connections
+  // Step 1: Stop accepting new HTTP connections
+  // Existing connections are allowed to complete
   server.close(() => {
     console.log("HTTP server closed");
 
-    // Shutdown OpenTelemetry to flush traces
+    // Step 2: Shutdown OpenTelemetry SDK
+    // Flushes any pending traces to Jaeger/collector
+    // Important to not lose trace data during shutdown
     otelSDK
       .shutdown()
       .then(() => {
@@ -653,7 +1371,8 @@ const gracefulShutdown = (server: ServerType) => (signal: string) => {
         console.error("Error shutting down OpenTelemetry:", err);
       })
       .finally(() => {
-        // Destroy S3 client
+        // Step 3: Clean up S3 client
+        // Closes HTTP connections to S3 service
         s3Client.destroy();
         console.log("S3 client destroyed");
         console.log("Graceful shutdown completed");
@@ -661,7 +1380,22 @@ const gracefulShutdown = (server: ServerType) => (signal: string) => {
   });
 };
 
-// Start server
+/**
+ * ============================================================================
+ * SERVER STARTUP
+ * ============================================================================
+ */
+
+/**
+ * Start HTTP Server
+ * Uses Hono's Node.js adapter for lightweight server
+ *
+ * Configuration:
+ * - fetch: Hono app handler
+ * - port: Configurable from environment (default 3000)
+ *
+ * Server will handle all registered routes and middleware
+ */
 const server = serve(
   {
     fetch: app.fetch,
@@ -676,7 +1410,20 @@ const server = serve(
   },
 );
 
-// Register shutdown handlers
+/**
+ * Signal Handlers for Graceful Shutdown
+ * 
+ * SIGTERM:
+ * - Sent by Kubernetes/Docker when requesting graceful shutdown
+ * - Allows 30 seconds for cleanup before SIGKILL
+ * - Used in production deployments
+ *
+ * SIGINT:
+ * - Sent by Ctrl+C from terminal
+ * - Used in development
+ *
+ * Both trigger graceful shutdown sequence defined above
+ */
 const shutdown = gracefulShutdown(server);
 process.on("SIGTERM", () => {
   shutdown("SIGTERM");

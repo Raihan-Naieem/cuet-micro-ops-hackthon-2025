@@ -1,6 +1,42 @@
+# ============================================================================
+# PRODUCTION DOCKER COMPOSE CONFIGURATION
+# ============================================================================
+# Minimal, secure setup optimized for production deployment
+#
+# Features:
+# - Single container API service (lightweight)
+# - MinIO S3 storage with persistent volume
+# - No development tools or extra dependencies
+# - Automatic restart on failure
+# - Volume-based data persistence
+#
+# To start:
+# npm run docker:prod
+#
+# Access:
+# - API: http://localhost:3000
+# - MinIO Console: http://localhost:9001 (user: minioadmin, pass: minioadmin)
+#
+# Environment Configuration:
+# Set required environment variables in .env file:
+# - NODE_ENV=production
+# - S3_ENDPOINT=http://delineate-minio:9000
+# - S3_ACCESS_KEY_ID=<secure-key>
+# - S3_SECRET_ACCESS_KEY=<secure-key>
+# - S3_BUCKET_NAME=downloads
+# - S3_FORCE_PATH_STYLE=true
+# - SENTRY_DSN=<your-sentry-url> (optional)
+
 name: delineate
 
 services:
+  # Main API Service - Production
+  # ============================================================================
+  # Optimized for production use with:
+  # - Automatic restart on failure (unless-stopped)
+  # - No source code mounting
+  # - Stateless, can scale horizontally
+  # - OpenTelemetry enabled for observability
   delineate-app:
     build:
       context: ..
@@ -11,4 +47,104 @@ services:
       - ../.env
     environment:
       - NODE_ENV=production
+      # S3 connectivity configured to MinIO
+      # Services communicate via service name on Docker network
+      - S3_ENDPOINT=http://delineate-minio:9000
+      - S3_ACCESS_KEY_ID=minioadmin
+      - S3_SECRET_ACCESS_KEY=minioadmin
+      - S3_BUCKET_NAME=downloads
+      - S3_FORCE_PATH_STYLE=true
     restart: unless-stopped
+    depends_on:
+      # Ensure MinIO bucket is initialized before app starts
+      delineate-minio-init:
+        condition: service_completed_successfully
+    # Optional: Add resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1'
+    #       memory: 512M
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 256M
+
+  # MinIO S3-Compatible Storage - Production
+  # ============================================================================
+  # Production-grade S3 storage with persistent volume
+  #
+  # Critical for Production:
+  # - volumes section persists data across restarts
+  # - Healthcheck ensures reliability
+  # - Change default credentials (see .env)
+  # - Consider backup strategy
+  # - Monitor disk space
+  delineate-minio:
+    image: minio/minio:latest
+    ports:
+      # S3 API endpoint - accessed by delineate-app service
+      - "9000:9000"
+      # Web console - access at http://localhost:9001 in browser
+      # In production, restrict this behind authentication/VPN
+      - "9001:9001"
+    environment:
+      # Change these in production! Use strong random values
+      # Example: openssl rand -base64 32
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: >
+      server /minio-data
+      --console-address ":9001"
+    # Health check ensures service is ready
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    # Persistent volume for S3 data
+    # Data survives container restarts
+    # In production, back up /minio-data regularly
+    volumes:
+      - minio-data:/minio-data
+    # Optional: Add resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'
+    #       memory: 1024M
+    #     reservations:
+    #       cpus: '1'
+    #       memory: 512M
+
+  # MinIO Initialization Service
+  # ============================================================================
+  # Creates required S3 bucket on startup
+  #
+  # Runs once after MinIO is healthy
+  # Creates 'downloads' bucket if it doesn't exist
+  # Exits successfully (doesn't run continuously)
+  delineate-minio-init:
+    image: minio/mc:latest
+    depends_on:
+      delineate-minio:
+        condition: service_healthy
+    entrypoint: >
+      bash -c "
+      /usr/bin/mc alias set minio http://delineate-minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb minio/downloads || true;
+      echo 'MinIO bucket initialized';
+      "
+
+# Persistent Volume
+# ============================================================================
+# Stores MinIO data across container restarts
+# Critical for production to avoid data loss
+volumes:
+  minio-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./minio-data

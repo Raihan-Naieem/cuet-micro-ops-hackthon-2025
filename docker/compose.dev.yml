@@ -1,6 +1,40 @@
+/**
+ * ============================================================================
+ * DEVELOPMENT DOCKER COMPOSE CONFIGURATION
+ * ============================================================================
+ * This file defines the complete development environment with:
+ * - API application with hot reload
+ * - MinIO S3-compatible storage
+ * - Jaeger distributed tracing UI
+ *
+ * Services:
+ * - delineate-app: Main API service (port 3000)
+ * - delineate-minio: S3-compatible storage (ports 9000, 9001)
+ * - delineate-jaeger: Distributed tracing UI (port 16686)
+ *
+ * To start:
+ * npm run docker:dev
+ *
+ * Then access:
+ * - API: http://localhost:3000
+ * - API Docs: http://localhost:3000/docs
+ * - MinIO Console: http://localhost:9001 (user: minioadmin, pass: minioadmin)
+ * - Jaeger UI: http://localhost:16686
+ */
+
 name: delineate
 
 services:
+  # Main API Service
+  # ============================================================================
+  # Node.js application with hot reload via volume mount
+  #
+  # Features:
+  # - Source files mounted for hot reload (src/:/app/src)
+  # - Depends on MinIO and Jaeger services
+  # - Environment file support for configuration
+  # - OpenTelemetry traces sent to Jaeger
+  # - S3 connectivity configured to MinIO
   delineate-app:
     build:
       context: ..
@@ -8,19 +42,141 @@ services:
     ports:
       - "3000:3000"
     volumes:
+      # Mount source directory for hot reload during development
       - ../src:/app/src
     env_file:
       - ../.env
     environment:
       - NODE_ENV=development
+      # Connect to Jaeger on the same Docker network
+      # Jaeger OTLP HTTP endpoint for trace export
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://delineate-jaeger:4318
+      # MinIO S3 connectivity
+      # Services communicate via service name on Docker network
+      - S3_ENDPOINT=http://delineate-minio:9000
+      - S3_ACCESS_KEY_ID=minioadmin
+      - S3_SECRET_ACCESS_KEY=minioadmin
+      - S3_BUCKET_NAME=downloads
+      - S3_FORCE_PATH_STYLE=true
     depends_on:
-      - delineate-jaeger
+      # Ensure MinIO bucket is created before app starts
+      delineate-minio-init:
+        condition: service_completed_successfully
+      # Ensure Jaeger is ready to receive traces
+      delineate-jaeger:
+        condition: service_started
 
+  # MinIO S3-Compatible Storage Service
+  # ============================================================================
+  # Production-grade S3-compatible object storage
+  # Perfect for development and testing without AWS account
+  #
+  # Default Credentials:
+  # - Access Key: minioadmin
+  # - Secret Key: minioadmin
+  #
+  # Ports:
+  # - 9000: S3 API endpoint (used by API)
+  # - 9001: Web console for manual bucket management
+  #
+  # Healthcheck:
+  # Ensures service is ready before API tries to connect
+  # Uses MinIO ping to verify S3 API is accessible
+  #
+  # Initialization:
+  # Creates 'downloads' bucket on startup if it doesn't exist
+  # This is the bucket where files are stored and checked
+  delineate-minio:
+    image: minio/minio:latest
+    ports:
+      # S3 API endpoint - accessed by delineate-app service
+      - "9000:9000"
+      # Web console - access at http://localhost:9001 in browser
+      - "9001:9001"
+    environment:
+      # Default root credentials (change in production!)
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: >
+      server /minio-data
+      --console-address ":9001"
+    # Health check to ensure service is ready
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Optional: Persist data across restarts
+    # Uncomment if you want to keep uploaded files between container restarts
+    # volumes:
+    #   - minio-data:/minio-data
+
+  # MinIO Initialization Service
+  # ============================================================================
+  # One-time service that creates the 'downloads' bucket on startup
+  #
+  # Purpose:
+  # MinIO doesn't auto-create buckets, so we need an init container
+  # This runs after MinIO is healthy and creates the required bucket
+  #
+  # Uses:
+  # - minio/mc: MinIO Command-line Client
+  # - Simple bash script to create bucket
+  # - Exits after completion (not a long-running service)
+  delineate-minio-init:
+    image: minio/mc:latest
+    depends_on:
+      delineate-minio:
+        condition: service_healthy
+    entrypoint: >
+      bash -c "
+      /usr/bin/mc alias set minio http://delineate-minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb minio/downloads || true;
+      echo 'MinIO bucket initialized';
+      "
+
+  # Jaeger Distributed Tracing
+  # ============================================================================
+  # Complete tracing solution for observability
+  #
+  # Features:
+  # - Collects traces from OpenTelemetry SDK
+  # - Stores trace data in memory (dev-only, not persistent)
+  # - Provides beautiful UI for trace visualization
+  # - Helps understand request flow and performance
+  #
+  # Ports:
+  # - 16686: Web UI - access at http://localhost:16686
+  # - 4318: OTLP HTTP receiver - receives traces from app
+  # - Other ports: Thrift, gRPC (not needed for this setup)
+  #
+  # Environment:
+  # COLLECTOR_OTLP_ENABLED: Enables OTLP protocol for receiving traces
+  # This is how OpenTelemetry SDK sends traces to Jaeger
+  #
+  # Usage:
+  # 1. Make API requests to generate traces
+  # 2. Open http://localhost:16686
+  # 3. Select service "delineate-hackathon-challenge"
+  # 4. View request traces, timings, and dependencies
+  #
+  # Note:
+  # Data is stored in-memory and lost when container stops
+  # For persistent storage in production, use external database
   delineate-jaeger:
     image: jaegertracing/all-in-one:latest
     ports:
+      # Web UI for trace visualization
       - "16686:16686"
+      # OTLP HTTP receiver (traces from OpenTelemetry SDK)
       - "4318:4318"
     environment:
+      # Enable OTLP protocol support
       - COLLECTOR_OTLP_ENABLED=true
+
+# Volumes (Optional)
+# ============================================================================
+# Uncomment if you want persistent MinIO data
+# volumes:
+#   minio-data:
+#     driver: local
