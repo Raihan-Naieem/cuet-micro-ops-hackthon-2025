@@ -1,5 +1,6 @@
+
+name: delineate
 services:
-  # API Service
   delineate-app:
     build:
       context: ..
@@ -18,7 +19,6 @@ services:
       - minio
       - init-minio
 
-  # Jaeger Service
   delineate-jaeger:
     image: jaegertracing/all-in-one:latest
     ports:
@@ -27,7 +27,6 @@ services:
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
 
-  # MinIO Service
   minio:
     image: minio/minio
     container_name: minio
@@ -40,7 +39,6 @@ services:
       - minio_data:/data
     command: server /data
 
-  # Init container to create 'downloads' bucket
   init-minio:
     image: minio/mc
     depends_on:
